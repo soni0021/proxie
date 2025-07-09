@@ -1,10 +1,2 @@
 /Users/devashishsoni/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:34: NotOpenSSLWarning: urllib3 v2.0 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
   warnings.warn(
-Loaded 24 proxies for rotation
-Starting ConfirmTkt Clone server...
-Proxy rotation enabled with smart retry logic
- * Serving Flask app 'confirmtkt_clone'
- * Debug mode: off
-Address already in use
-Port 5000 is in use by another program. Either identify and stop that program, or start the server with a different port.
-On macOS, try disabling the 'AirPlay Receiver' service from System Preferences -> General -> AirDrop & Handoff.

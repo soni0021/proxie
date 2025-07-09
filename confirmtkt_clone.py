@@ -211,13 +211,96 @@ class ConfirmTktAPI:
         self.max_retries = 3
         self.retry_delay = 2
         print("Starting ConfirmTkt Clone server...")
-        print("Proxy rotation enabled with smart retry logic")
         
+        # Start proxy testing in a separate thread
+        import threading
+        self.proxy_test_thread = threading.Thread(target=self.test_proxies)
+        self.proxy_test_thread.daemon = True
+        self.proxy_test_thread.start()
+        print("Proxy testing started in background...")
+
+    def test_proxy(self, proxy):
+        """Test if a proxy is working by making a request to a test URL"""
+        test_urls = [
+            "https://www.confirmtkt.com/",  # Primary test URL
+            "https://www.google.com",       # Backup test URL
+            "https://www.cloudflare.com"    # Second backup
+        ]
+        
+        for test_url in test_urls:
+            try:
+                proxy_url = f"http://{proxy}" if not proxy.startswith('http') else proxy
+                
+                with requests.Session() as session:
+                    session.verify = False
+                    session.headers.update(self.base_headers)
+                    session.proxies = {
+                        'http': proxy_url,
+                        'https': proxy_url
+                    }
+                    
+                    start_time = time.time()
+                    response = session.get(test_url, timeout=5)  # Reduced timeout for faster testing
+                    response_time = time.time() - start_time
+                    
+                    if response.status_code == 200:
+                        print(f"Proxy {proxy} working with {test_url}, response time: {response_time:.2f}s")
+                        return True, response_time
+                        
+            except Exception as e:
+                print(f"Proxy {proxy} failed with {test_url}: {str(e)}")
+                continue
+                
+        return False, float('inf')
+
+    def test_proxies(self):
+        """Test all proxies and keep only working ones"""
+        working_proxies = []
+        fast_proxies = []
+        
+        print("Testing all proxies...")
+        for proxy in self.proxy_rotator.proxies[:]:  # Copy list to avoid modification during iteration
+            is_working, response_time = self.test_proxy(proxy)
+            if is_working:
+                working_proxies.append(proxy)
+                if response_time < 5.0:  # Increased threshold for fast proxies
+                    fast_proxies.append(proxy)
+                    
+        if working_proxies:
+            print(f"Found {len(working_proxies)} working proxies ({len(fast_proxies)} fast)")
+            self.proxy_rotator.proxies = working_proxies
+            self.proxy_rotator.fast_proxies = fast_proxies
+            
+            # Save working proxies for future use
+            with open('working_proxies.txt', 'w') as f:
+                f.write('\n'.join(working_proxies))
+            print("Saved working proxies to working_proxies.txt")
+            
+            # Save detailed proxy info
+            proxy_details = {
+                'working_proxies': [
+                    {
+                        'proxy': proxy,
+                        'timings': {
+                            'total': response_time
+                        }
+                    }
+                    for proxy, response_time in zip(working_proxies, [5.0 if proxy in fast_proxies else 10.0 for proxy in working_proxies])
+                ]
+            }
+            with open('working_proxies_detailed.json', 'w') as f:
+                json.dump(proxy_details, f, indent=2)
+            print("Saved detailed proxy info to working_proxies_detailed.json")
+        else:
+            print("No working proxies found!")
+            
+        return bool(working_proxies)
+
     def make_request_with_proxy(self, url, method='get', **kwargs):
         """Make HTTP request with smart proxy rotation and retry logic"""
         retries = 0
-        max_retries = 2  # Reduced from 3 to 2 for faster response
-        initial_timeout = 10  # Initial timeout of 10 seconds
+        max_retries = 5  # Increased retries
+        initial_timeout = 30  # Increased timeout
         
         # Set default timeout if not provided
         if 'timeout' not in kwargs:
@@ -230,70 +313,125 @@ class ConfirmTktAPI:
         # Add cache control headers
         kwargs['headers'].update({
             'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache'
+            'Pragma': 'no-cache',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.confirmtkt.com/',
+            'Origin': 'https://www.confirmtkt.com',
+            'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1'
         })
         
+        last_error = None
         while retries < max_retries:
             try:
                 # Always use proxy - never expose real IP
                 proxy = self.proxy_rotator.get_proxy()
                 if not proxy:
                     print("No proxies available!")
-                    return None
+                    time.sleep(5)  # Wait for proxy testing to complete
+                    continue
         
-                # Format proxy URL
-                proxy_url = f"http://{proxy}" if not proxy.startswith('http') else proxy
-                kwargs['proxies'] = {'http': proxy_url, 'https': proxy_url}
+                print(f"Trying proxy: {proxy} (Attempt {retries + 1}/{max_retries})")
                 
-                # Make request and measure time
-                start_time = time.time()
+                # Try different proxy formats
+                proxy_formats = [
+                    f"http://{proxy}",  # Standard HTTP
+                    f"https://{proxy}",  # HTTPS
+                    f"socks5h://{proxy}"  # SOCKS5 with remote DNS
+                ]
                 
-                # Use session for connection pooling
-                with requests.Session() as session:
-                    # Set session-level parameters
-                    session.verify = False
-                    session.headers.update(kwargs['headers'])
-                    session.proxies = kwargs['proxies']
-                    
-                    # Make the request
-                    response = session.request(method, url, **{k:v for k,v in kwargs.items() if k not in ['headers', 'proxies', 'verify']})
-                    
-                response_time = time.time() - start_time
-                
-                if response.status_code == 200:
-                    # Update proxy stats with success
-                    self.proxy_rotator.update_proxy_stats(proxy, True, response_time)
-                    return response
-                elif response.status_code == 404:
-                    # Don't retry on 404, but mark proxy as working
-                    self.proxy_rotator.update_proxy_stats(proxy, True, response_time)
-                    return response
-                else:
-                    # Mark proxy as failed for non-200 responses
-                    self.proxy_rotator.update_proxy_stats(proxy, False)
-                    print(f"Request failed with status {response.status_code}, trying different proxy...")
+                for proxy_url in proxy_formats:
+                    try:
+                        print(f"Trying proxy format: {proxy_url}")
+                        kwargs['proxies'] = {
+                            'http': proxy_url,
+                            'https': proxy_url
+                        }
+                        
+                        # Make request and measure time
+                        start_time = time.time()
+                        
+                        # Use session for connection pooling
+                        with requests.Session() as session:
+                            # Set session-level parameters
+                            session.verify = False
+                            session.headers.update(kwargs['headers'])
+                            session.proxies = kwargs['proxies']
+                            
+                            # Make the request
+                            response = session.request(
+                                method, 
+                                url, 
+                                timeout=kwargs['timeout'],
+                                **{k:v for k,v in kwargs.items() if k not in ['headers', 'proxies', 'verify', 'timeout']}
+                            )
+                            
+                        response_time = time.time() - start_time
+                        print(f"Response time: {response_time:.2f}s")
+                        
+                        if response.status_code == 200:
+                            # Check if response has actual content
+                            if len(response.text.strip()) > 0:
+                                # Update proxy stats with success
+                                self.proxy_rotator.update_proxy_stats(proxy, True, response_time)
+                                return response
+                            else:
+                                print("Empty response received")
+                                continue
+                        elif response.status_code == 404:
+                            # Don't retry on 404, but mark proxy as working
+                            self.proxy_rotator.update_proxy_stats(proxy, True, response_time)
+                            return response
+                        else:
+                            # Mark proxy as failed for non-200 responses
+                            print(f"Request failed with status {response.status_code}")
+                            self.proxy_rotator.update_proxy_stats(proxy, False)
+                            last_error = f"HTTP {response.status_code}"
+                            continue
+                            
+                    except (requests.exceptions.ProxyError, requests.exceptions.ConnectTimeout) as e:
+                        print(f"Proxy format {proxy_url} failed: {str(e)}")
+                        continue
+                        
+                # If we get here, all proxy formats failed
+                self.proxy_rotator.update_proxy_stats(proxy, False)
+                print(f"All proxy formats failed for {proxy}")
                     
             except requests.exceptions.Timeout:
                 # For timeout errors, mark proxy as failed but don't increase timeout
                 if proxy:
                     self.proxy_rotator.update_proxy_stats(proxy, False)
                 print(f"Request timeout with proxy {proxy}")
+                last_error = "Timeout"
                 
             except requests.exceptions.RequestException as e:
                 # Mark proxy as failed on connection errors
                 if proxy:
                     self.proxy_rotator.update_proxy_stats(proxy, False)
                 print(f"Request error with proxy {proxy}: {str(e)}")
+                last_error = str(e)
                 
             except Exception as e:
                 if proxy:
                     self.proxy_rotator.update_proxy_stats(proxy, False)
                 print(f"Unexpected error with proxy {proxy}: {str(e)}")
+                last_error = str(e)
             
             retries += 1
             if retries < max_retries:
-                time.sleep(1)  # Fixed 1 second delay between retries
+                time.sleep(5)  # Increased delay between retries
         
+        if last_error:
+            raise Exception(f"All proxy attempts failed. Last error: {last_error}")
         return None
     
     def clean_text(self, text):
@@ -841,17 +979,46 @@ class ConfirmTktAPI:
     def get_pnr_status(self, pnr_number):
         """Get PNR status using ConfirmTkt API"""
         try:
-            main_url = f"{self.base_url}/pnr-status/{pnr_number}"
-            response = self.make_request_with_proxy(
-                main_url,
-                headers=self.base_headers,
-                verify=False
-            )
+            # Use cached response if available
+            cache_key = f"pnr_{pnr_number}"
+            cached_response = getattr(self, cache_key, None)
+            if cached_response and time.time() - cached_response['timestamp'] < 300:  # 5 min cache
+                return cached_response['data']
+
+            # Updated URL format to match the website
+            main_url = f"{self.base_url}/rbooking/pnr/{pnr_number}"
+            print(f"Fetching PNR status from: {main_url}")
+            
+            # Use session for connection pooling and set aggressive timeouts
+            with requests.Session() as session:
+                session.verify = False
+                session.headers.update(self.base_headers)
+                session.headers.update({
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Referer': 'https://www.confirmtkt.com/',
+                    'Origin': 'https://www.confirmtkt.com'
+                })
+                
+                response = self.make_request_with_proxy(
+                    main_url,
+                    timeout=15,  # 15 second timeout
+                    verify=False
+                )
             
             if response and response.status_code == 200:
+                print("Got 200 response, parsing HTML...")
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
-                # Initialize response structure to match the desired format
+                # Save the HTML for debugging
+                with open('pnr_test_response.html', 'w') as f:
+                    f.write(response.text)
+                print("Saved response HTML to pnr_test_response.html")
+                
+                # Initialize response structure
                 result = {
                     'pnr': pnr_number,
                     'train_number': '',
@@ -860,151 +1027,114 @@ class ConfirmTktAPI:
                         'from': '',
                         'to': '',
                         'date': '',
-                        'platform': '',
                         'class': '',
-                        'quota': ''
+                        'quota': '',
+                        'platform': ''
                     },
                     'passengers': [],
                     'chart_status': 'Chart not prepared',
                     'rating': None
                 }
                 
-                # Extract train number and name from title or headers
-                title = soup.find('title')
-                if title:
-                    title_text = title.text
-                    # Look for train number pattern
-                    train_match = re.search(r'(\d{5})', title_text)
+                # Extract train number and name
+                train_info = soup.find('h2') or soup.find('h1')
+                if train_info:
+                    print(f"Found train info: {train_info.text.strip()}")
+                    train_text = train_info.get_text().strip()
+                    train_match = re.search(r'(\d{5})\s*[-–]\s*([^\n]+)', train_text)
                     if train_match:
                         result['train_number'] = train_match.group(1)
+                        result['train_name'] = train_match.group(2).strip()
+                        print(f"Extracted train: {result['train_number']} - {result['train_name']}")
                 
-                # Look for train information in the page content
-                page_text = soup.get_text()
-                
-                # Extract train name (e.g., "15013 - RANIKHET EXP")
-                train_name_match = re.search(r'(\d{5})\s*-\s*([A-Z\s]+(?:EXP|EXPRESS|MAIL|SF))', page_text)
-                if train_name_match:
-                    result['train_number'] = train_name_match.group(1)
-                    result['train_name'] = train_name_match.group(2).strip()
-                
-                # Extract journey information
-                # Look for route pattern (e.g., "Rajgarh - RHG, 17:05 → Kathgodam - KGM, 05:05")
-                route_match = re.search(r'([A-Za-z\s]+)\s*-\s*([A-Z]{3,4}),\s*(\d{2}:\d{2})\s*→\s*([A-Za-z\s]+)\s*-\s*([A-Z]{3,4}),\s*(\d{2}:\d{2})', page_text)
-                if route_match:
-                    result['train_journey']['from'] = f"{route_match.group(1).strip()} - {route_match.group(2)}, {route_match.group(3)}"
-                    result['train_journey']['to'] = f"{route_match.group(4).strip()} - {route_match.group(5)}, {route_match.group(6)}"
-                
-                # Extract date and class information
-                # Look for date pattern (e.g., "Fri, 11 Jul | SL | GN | Expected platform: 4")
-                date_class_match = re.search(r'([A-Za-z]{3}),\s*(\d{1,2}\s+[A-Za-z]{3})\s*\|\s*([A-Z]{1,3})\s*\|\s*([A-Z]{1,3})\s*\|\s*Expected platform:\s*(\d+)', page_text)
-                if date_class_match:
-                    result['train_journey']['date'] = f"{date_class_match.group(1)}, {date_class_match.group(2)}"
-                    result['train_journey']['class'] = date_class_match.group(3)
-                    result['train_journey']['quota'] = date_class_match.group(4)
-                    result['train_journey']['platform'] = date_class_match.group(5)
+                # Extract journey details
+                journey_div = soup.find('div', class_=lambda x: x and any(c in str(x).lower() for c in ['journey', 'travel', 'route']))
+                if journey_div:
+                    print(f"Found journey div: {journey_div.text.strip()}")
+                    journey_text = journey_div.get_text()
+                    
+                    # Extract stations and timings
+                    station_pattern = r'([A-Za-z\s]+)\s*-\s*([A-Z]{3,4}),\s*(\d{2}:\d{2})\s*[→⟶]\s*([A-Za-z\s]+)\s*-\s*([A-Z]{3,4}),\s*(\d{2}:\d{2})'
+                    journey_match = re.search(station_pattern, journey_text)
+                    if journey_match:
+                        result['train_journey'].update({
+                            'from': f"{journey_match.group(1).strip()} - {journey_match.group(2)}, {journey_match.group(3)}",
+                            'to': f"{journey_match.group(4).strip()} - {journey_match.group(5)}, {journey_match.group(6)}"
+                        })
+                        print(f"Extracted journey: {result['train_journey']['from']} → {result['train_journey']['to']}")
+                    
+                    # Extract date, class, quota and platform
+                    details_pattern = r'(?:([A-Za-z]{3}),\s*(\d{1,2}\s+[A-Za-z]{3}))\s*\|\s*([A-Z]{1,2})\s*\|\s*([A-Z]{2})\s*\|\s*Expected platform:\s*(\d+)'
+                    details_match = re.search(details_pattern, journey_text)
+                    if details_match:
+                        result['train_journey'].update({
+                            'date': f"{details_match.group(1)}, {details_match.group(2)}",
+                            'class': details_match.group(3),
+                            'quota': details_match.group(4),
+                            'platform': details_match.group(5)
+                        })
+                        print(f"Extracted details: {result['train_journey']['date']} | {result['train_journey']['class']} | {result['train_journey']['quota']} | Platform: {result['train_journey']['platform']}")
                 
                 # Extract chart status
-                chart_match = re.search(r'Chart (not prepared|prepared)', page_text, re.IGNORECASE)
-                if chart_match:
-                    result['chart_status'] = f"Chart {chart_match.group(1)}"
+                chart_div = soup.find('div', class_=lambda x: x and 'chart' in str(x).lower())
+                if chart_div:
+                    chart_text = chart_div.get_text().strip()
+                    print(f"Found chart status: {chart_text}")
+                    if 'not prepared' in chart_text.lower():
+                        result['chart_status'] = 'Chart not prepared'
+                    elif 'prepared' in chart_text.lower():
+                        result['chart_status'] = 'Chart prepared'
                 
-                # Look for passenger information table
-                # Find table with passenger data
-                tables = soup.find_all('table')
-                for table in tables:
-                    rows = table.find_all('tr')
-                    if len(rows) > 1:
-                        # Check if this looks like a passenger table
-                        header_row = rows[0]
-                        headers = [th.get_text().strip().lower() for th in header_row.find_all(['th', 'td'])]
-                        
-                        if any(h in ' '.join(headers) for h in ['passenger', 'current', 'booking', 'status', 'coach']):
-                            print(f"Found passenger table with headers: {headers}")
+                # Find passenger table
+                passenger_table = soup.find('table')
+                if passenger_table:
+                    print("Found passenger table")
+                    rows = passenger_table.find_all('tr')
+                    for i, row in enumerate(rows[1:], 1):  # Skip header
+                        cols = row.find_all(['td', 'th'])
+                        if len(cols) >= 3:
+                            current_status = cols[1].get_text().strip()
+                            booking_status = cols[2].get_text().strip()
+                            coach = cols[3].get_text().strip() if len(cols) > 3 else '-'
                             
-                            for i, row in enumerate(rows[1:], 1):
-                                cols = row.find_all(['td', 'th'])
-                                if len(cols) >= 3:
-                                    passenger = {
-                                        'sr_no': str(i),
-                                        'current_status': {
-                                            'status': '',
-                                            'available': False,
-                                            'coach': '',
-                                            'berth': ''
-                                        },
-                                        'booking_status': '',
-                                        'coach': ''
-                                    }
-                                    
-                                    # Extract current status (first column after S.No)
-                                    if len(cols) >= 2:
-                                        current_status_text = cols[1].get_text().strip()
-                                        passenger['current_status']['status'] = current_status_text
-                                        
-                                        # Check if it's available (green text or "Available" keyword)
-                                        if 'available' in current_status_text.lower() or cols[1].find('span', style=lambda x: x and 'green' in str(x).lower()):
-                                            passenger['current_status']['available'] = True
-                                        
-                                        # Parse RAC/berth information
-                                        rac_match = re.search(r'(RAC|GNWL|CNF)\s*(\d+)', current_status_text)
-                                        if rac_match:
-                                            passenger['current_status']['coach'] = rac_match.group(1)
-                                            passenger['current_status']['berth'] = rac_match.group(2)
-                                    
-                                    # Extract booking status
-                                    if len(cols) >= 3:
-                                        booking_status_text = cols[2].get_text().strip()
-                                        passenger['booking_status'] = booking_status_text
-                                    
-                                    # Extract coach information (if separate column)
-                                    if len(cols) >= 4:
-                                        coach_text = cols[3].get_text().strip()
-                                        passenger['coach'] = coach_text if coach_text != '-' else ''
-                                    
-                                    result['passengers'].append(passenger)
-                
-                # If no table found, try to extract passenger info from divs/spans
-                if not result['passengers']:
-                    # Look for passenger status in various elements
-                    passenger_elements = soup.find_all(['div', 'span'], class_=lambda x: x and any(
-                        keyword in str(x).lower() for keyword in ['passenger', 'status', 'rac', 'gnwl', 'cnf']
-                    ))
-                    
-                    passenger_count = 1
-                    for element in passenger_elements:
-                        text = element.get_text().strip()
-                        if any(status in text for status in ['RAC', 'GNWL', 'CNF', 'Available']):
+                            print(f"Processing passenger {i}: Current={current_status}, Booking={booking_status}, Coach={coach}")
+                            
+                            # Parse RAC/WL number
+                            current_status_match = re.search(r'(RAC|GNWL|CNF)\s*(\d+)', current_status)
+                            is_available = 'available' in current_status.lower() or cols[1].find('span', style=lambda x: x and 'green' in str(x).lower())
+                            
                             passenger = {
-                                'sr_no': str(passenger_count),
+                                'sr_no': str(i),
                                 'current_status': {
-                                    'status': text,
-                                    'available': 'available' in text.lower(),
-                                    'coach': '',
-                                    'berth': ''
+                                    'status': current_status_match.group(1) + ' ' + current_status_match.group(2) if current_status_match else current_status,
+                                    'available': bool(is_available),
+                                    'coach': current_status_match.group(1) if current_status_match else '',
+                                    'berth': current_status_match.group(2) if current_status_match else ''
                                 },
-                                'booking_status': '',
-                                'coach': ''
+                                'booking_status': booking_status,
+                                'coach': coach if coach != '-' else ''
                             }
-                            
-                            # Parse status
-                            status_match = re.search(r'(RAC|GNWL|CNF)\s*(\d+)', text)
-                            if status_match:
-                                passenger['current_status']['coach'] = status_match.group(1)
-                                passenger['current_status']['berth'] = status_match.group(2)
-                            
                             result['passengers'].append(passenger)
-                            passenger_count += 1
+                            print(f"Added passenger: {passenger}")
                 
                 # Extract rating if available
-                rating_elements = soup.find_all(['span', 'div'], class_=lambda x: x and 'rating' in str(x).lower())
-                for element in rating_elements:
-                    rating_text = element.get_text()
-                    rating_match = re.search(r'(\d+\.\d+)', rating_text)
+                rating_span = soup.find('span', class_=lambda x: x and 'rating' in str(x).lower())
+                if rating_span:
+                    rating_match = re.search(r'(\d+\.?\d*)', rating_span.get_text())
                     if rating_match:
                         result['rating'] = float(rating_match.group(1))
-                        break
-                    
-                print(f"PNR result: train={result['train_number']}, passengers={len(result['passengers'])}")
+                        print(f"Found rating: {result['rating']}")
+                
+                # Cache the response
+                setattr(self, cache_key, {
+                    'timestamp': time.time(),
+                    'data': {
+                        'status': 'success',
+                        'message': 'PNR status fetched successfully',
+                        'data': result
+                    }
+                })
+                
                 return {
                     'status': 'success',
                     'message': 'PNR status fetched successfully',
@@ -1399,8 +1529,10 @@ def pnr_status(pnr_number=None):
                 'message': 'PNR number is required'
             }), 400
         
-        result = api.get_pnr_status(pnr_number)
-        return jsonify(result)
+        # Add response caching header
+        response = make_response(jsonify(api.get_pnr_status(pnr_number)))
+        response.headers['Cache-Control'] = 'public, max-age=300'  # 5 min cache
+        return response
         
     except Exception as e:
         return jsonify({

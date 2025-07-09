@@ -3,4 +3,5 @@ requests>=2.25.0
 beautifulsoup4>=4.9.0
 urllib3>=1.26.0
 flask-compress>=1.10.0
-waitress>=2.0.0 
+waitress>=2.0.0
+PySocks>=1.7.1 
