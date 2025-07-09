@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Train Status & PNR Check</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .train-info {
+            flex: 1;
+        }
+        .train-info h2 {
+            margin: 0 0 10px 0;
+            color: #333;
+        }
+        .train-info p {
+            margin: 5px 0;
+            color: #666;
+        }
+        .status-section {
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .status-section h3 {
+            margin: 0 0 10px 0;
+            color: #1976d2;
+        }
+        .status-section p {
+            margin: 5px 0;
+            color: #333;
+        }
+        .status-badge {
+            padding: 8px 16px;
+            border-radius: 20px;
+            background: #e8f5e9;
+            color: #2e7d32;
+            font-weight: bold;
+        }
+        .error {
+            background: #ffebee;
+            color: #c62828;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        th {
+            background: #4caf50;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+        }
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #eee;
+        }
+        tr:last-child td {
+            border-bottom: none;
+        }
+        tr.current {
+            background: #e8f5e9;
+        }
+        tr.completed {
+            color: #666;
+        }
+        tr:hover {
+            background: #f5f5f5;
+        }
+        tr.current:hover {
+            background: #e8f5e9;
+        }
+        .green-dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            background: #4caf50;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .search-box {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        input {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        input:focus {
+            outline: none;
+            border-color: #4caf50;
+            box-shadow: 0 0 0 2px rgba(76,175,80,0.1);
+        }
+        button {
+            padding: 12px 24px;
+            background: #4caf50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+            display: none;
+        }
+        .no-data {
+            text-align: center;
+            padding: 40px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            margin: 20px 0;
+            color: #666;
+        }
+        .no-data h3 {
+            margin: 0 0 10px 0;
+            color: #333;
+        }
+        .no-data p {
+            margin: 0;
+            font-size: 16px;
+        }
+        .live-status-badge {
+            display: inline-block;
+            padding: 6px 12px;
+            background: #e8f5e9;
+            color: #2e7d32;
+            border-radius: 16px;
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 20px;
+        }
+        .tab-buttons {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .tab-button {
+            padding: 10px 20px;
+            background: #f0f0f0;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .tab-button.active {
+            background: #4caf50;
+            color: white;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        .available {
+            color: #4caf50;
+            font-weight: bold;
+        }
+        .pnr-journey {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .chart-status {
+            float: right;
+            padding: 8px 16px;
+            background: #fff3cd;
+            border-radius: 16px;
+            font-size: 14px;
+            color: #856404;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="tab-buttons">
+            <button class="tab-button active" onclick="showTab('live-status')">Live Status</button>
+            <button class="tab-button" onclick="showTab('train-schedule')">Train Schedule</button>
+            <button class="tab-button" onclick="showTab('pnr-status')">PNR Status</button>
+        </div>
+
+        <!-- Live Status Tab -->
+        <div id="live-status" class="tab-content active">
+            <div class="search-box">
+                <input type="text" id="trainNumber" placeholder="Enter Train Number (e.g., 22482)" />
+                <button onclick="getLiveStatus()">Get Live Status</button>
+            </div>
+            
+            <div id="loading" class="loading">
+                Loading status...
+            </div>
+            
+            <div id="errorMessage" class="error" style="display: none;"></div>
+            
+            <div id="statusContainer" style="display: none;">
+                <div class="card">
+                    <div class="header">
+                        <div class="train-info">
+                            <h2 id="trainName"></h2>
+                            <p>Train Number: <span id="trainNumberDisplay"></span></p>
+                            <span class="live-status-badge">LIVE STATUS</span>
+                        </div>
+                    </div>
+                    
+                    <div id="noDataMessage" class="no-data" style="display: none;">
+                        <h3>No Schedule Data Available</h3>
+                        <p>We couldn't find any schedule information for this train at the moment.</p>
+                    </div>
+                    
+                    <div id="scheduleContent" style="display: none;">
+                        <div class="status-section">
+                            <h3>Current Status</h3>
+                            <p id="currentStatus"></p>
+                            <p>Current Station: <span id="currentStation"></span></p>
+                            <p>Next Station: <span id="nextStation"></span></p>
+                            <p>Last Updated: <span id="lastUpdated"></span></p>
+                        </div>
+                        
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Station</th>
+                                    <th>Date</th>
+                                    <th>Arrives</th>
+                                    <th>Departs</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="scheduleBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Train Schedule Tab -->
+        <div id="train-schedule" class="tab-content">
+            <div class="search-box">
+                <input type="text" id="scheduleTrainNumber" placeholder="Enter Train Number (e.g., 22482)" />
+                <button onclick="getTrainSchedule()">Get Train Schedule</button>
+            </div>
+            
+            <div id="scheduleLoading" class="loading">
+                Loading train schedule...
+            </div>
+            
+            <div id="scheduleErrorMessage" class="error" style="display: none;"></div>
+            
+            <div id="trainScheduleContainer" style="display: none;">
+                <div class="card">
+                    <div class="header">
+                        <div class="train-info">
+                            <h2 id="scheduleTrainName"></h2>
+                            <p>Train Number: <span id="scheduleTrainNumberDisplay"></span></p>
+                            <p>Route: <span id="trainRoute"></span></p>
+                            <p>Running Days: <span id="runningDays"></span></p>
+                            <span class="live-status-badge">TRAIN SCHEDULE</span>
+                        </div>
+                    </div>
+                    
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>S.No</th>
+                                <th>Station</th>
+                                <th>Code</th>
+                                <th>Arrives</th>
+                                <th>Departs</th>
+                                <th>Halt</th>
+                                <th>Distance</th>
+                                <th>Day</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trainScheduleBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- PNR Status Tab -->
+        <div id="pnr-status" class="tab-content">
+            <div class="search-box">
+                <input type="text" id="pnrNumber" placeholder="Enter PNR Number (e.g., 2238241274)" />
+                <button onclick="getPNRStatus()">Check PNR Status</button>
+            </div>
+            
+            <div id="pnrLoading" class="loading">
+                Loading PNR status...
+            </div>
+            
+            <div id="pnrErrorMessage" class="error" style="display: none;"></div>
+            
+            <div id="pnrContainer" style="display: none;">
+                <div class="card">
+                    <div class="header">
+                        <div class="train-info">
+                            <h2>PNR: <span id="pnrNumberDisplay"></span> <button onclick="changePNR()" style="background: #4caf50; color: white; border: none; border-radius: 4px; padding: 4px 8px; font-size: 12px;">CHANGE</button></h2>
+                            <p id="trainInfo"></p>
+                            <p id="journeyInfo"></p>
+                            <p id="dateInfo"></p>
+                        </div>
+                        <div class="chart-status" id="chartStatus">Chart not prepared</div>
+                    </div>
+                    
+                    <div class="pnr-journey" id="journeyDetails" style="display: none;">
+                        <h4>Journey Details</h4>
+                        <p><strong>From:</strong> <span id="fromStation"></span></p>
+                        <p><strong>To:</strong> <span id="toStation"></span></p>
+                        <p><strong>Date:</strong> <span id="journeyDate"></span></p>
+                        <p><strong>Platform:</strong> <span id="platform"></span></p>
+                    </div>
+                    
+                    <h3>Passenger Status</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>S. No</th>
+                                <th>Current Status</th>
+                                <th>Booking Status</th>
+                                <th>Coach</th>
+                            </tr>
+                        </thead>
+                        <tbody id="passengerBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function showTab(tabName) {
+            // Hide all tab contents
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Remove active class from all tab buttons
+            document.querySelectorAll('.tab-button').forEach(button => {
+                button.classList.remove('active');
+            });
+            
+            // Show selected tab
+            document.getElementById(tabName).classList.add('active');
+            
+            // Add active class to clicked button
+            event.target.classList.add('active');
+        }
+
+        function getLiveStatus() {
+            const trainNumber = document.getElementById('trainNumber').value;
+            if (!trainNumber) {
+                showError('Please enter a train number');
+                return;
+            }
+            
+            showLoading();
+            hideError();
+            hideStatus();
+            
+            fetch(`/api/live-status/${trainNumber}`)
+                .then(response => response.json())
+                .then(data => {
+                    hideLoading();
+                    
+                    if (data.status === 'error') {
+                        showError(data.message);
+                        return;
+                    }
+                    
+                    updateStatus(data.data);
+                })
+                .catch(error => {
+                    hideLoading();
+                    showError('Failed to fetch train status. Please try again.');
+                    console.error('Error:', error);
+                });
+        }
+
+        function getPNRStatus() {
+            const pnrNumber = document.getElementById('pnrNumber').value;
+            if (!pnrNumber) {
+                showPNRError('Please enter a PNR number');
+                return;
+            }
+            
+            showPNRLoading();
+            hidePNRError();
+            hidePNRStatus();
+            
+            fetch(`/api/pnr-status/${pnrNumber}`)
+                .then(response => response.json())
+                .then(data => {
+                    hidePNRLoading();
+                    
+                    if (data.status === 'error') {
+                        showPNRError(data.message);
+                        return;
+                    }
+                    
+                    updatePNRStatus(data.data);
+                })
+                .catch(error => {
+                    hidePNRLoading();
+                    showPNRError('Failed to fetch PNR status. Please try again.');
+                    console.error('Error:', error);
+                });
+        }
+
+        function getTrainSchedule() {
+            const trainNumber = document.getElementById('scheduleTrainNumber').value;
+            if (!trainNumber) {
+                showScheduleError('Please enter a train number');
+                return;
+            }
+            
+            showScheduleLoading();
+            hideScheduleError();
+            hideTrainSchedule();
+            
+            fetch(`/api/train-schedule/${trainNumber}`)
+                .then(response => response.json())
+                .then(data => {
+                    hideScheduleLoading();
+                    
+                    if (data.status === 'error') {
+                        showScheduleError(data.message);
+                        return;
+                    }
+                    
+                    updateTrainSchedule(data.data);
+                })
+                .catch(error => {
+                    hideScheduleLoading();
+                    showScheduleError('Failed to fetch train schedule. Please try again.');
+                    console.error('Error:', error);
+                });
+        }
+        
+        function updateStatus(data) {
+            document.getElementById('trainName').textContent = data.train_name || `Train ${data.train_number}`;
+            document.getElementById('trainNumberDisplay').textContent = data.train_number;
+            
+            // Show the status container
+            document.getElementById('statusContainer').style.display = 'block';
+            
+            if (!data.has_data || !data.schedule || data.schedule.length === 0) {
+                // Show no data message
+                document.getElementById('noDataMessage').style.display = 'block';
+                document.getElementById('scheduleContent').style.display = 'none';
+                return;
+            }
+            
+            // Show schedule content
+            document.getElementById('noDataMessage').style.display = 'none';
+            document.getElementById('scheduleContent').style.display = 'block';
+            
+            document.getElementById('currentStation').textContent = data.current_station || 'Yet to start';
+            document.getElementById('nextStation').textContent = data.next_station || 'N/A';
+            document.getElementById('lastUpdated').textContent = data.last_updated || 'N/A';
+            document.getElementById('currentStatus').textContent = data.current_status || 'Status Unknown';
+            
+            const scheduleBody = document.getElementById('scheduleBody');
+            scheduleBody.innerHTML = '';
+            
+            data.schedule.forEach(station => {
+                const row = document.createElement('tr');
+                if (station.status === 'current') {
+                    row.className = 'current';
+                } else if (station.status === 'completed') {
+                    row.className = 'completed';
+                }
+                
+                row.innerHTML = `
+                    <td>
+                        ${station.status === 'current' ? '<span class="green-dot"></span>' : ''}
+                        ${station.station}
+                    </td>
+                    <td>${station.date || '-'}</td>
+                    <td>${station.arrives || '-'}</td>
+                    <td>${station.departs || '-'}</td>
+                    <td>${station.status === 'current' ? 'Current Station' : 
+                         station.status === 'completed' ? 'Completed' :
+                         station.status || 'Right Time'}</td>
+                `;
+                
+                scheduleBody.appendChild(row);
+            });
+        }
+
+        function updatePNRStatus(data) {
+            document.getElementById('pnrNumberDisplay').textContent = data.pnr;
+            document.getElementById('trainInfo').textContent = `${data.train_number} - ${data.train_name}`;
+            document.getElementById('chartStatus').textContent = data.chart_status;
+            
+            // Show journey details if available
+            if (data.train_journey.from || data.train_journey.to) {
+                document.getElementById('journeyDetails').style.display = 'block';
+                document.getElementById('fromStation').textContent = data.train_journey.from || 'N/A';
+                document.getElementById('toStation').textContent = data.train_journey.to || 'N/A';
+                document.getElementById('journeyDate').textContent = data.train_journey.date || 'N/A';
+                document.getElementById('platform').textContent = data.train_journey.platform || 'N/A';
+            }
+            
+            // Update passenger table
+            const passengerBody = document.getElementById('passengerBody');
+            passengerBody.innerHTML = '';
+            
+            if (data.passengers && data.passengers.length > 0) {
+                data.passengers.forEach(passenger => {
+                    const row = document.createElement('tr');
+                    
+                    const statusClass = passenger.current_status.available ? 'available' : '';
+                    
+                    row.innerHTML = `
+                        <td>${passenger.sr_no}</td>
+                        <td class="${statusClass}">
+                            ${passenger.current_status.status}
+                            ${passenger.current_status.available ? '<br><small>Available</small>' : ''}
+                        </td>
+                        <td>${passenger.booking_status}</td>
+                        <td>${passenger.coach || '-'}</td>
+                    `;
+                    
+                    passengerBody.appendChild(row);
+                });
+            } else {
+                passengerBody.innerHTML = '<tr><td colspan="4" style="text-align: center;">No passenger information available</td></tr>';
+            }
+            
+            showPNRStatus();
+        }
+
+        function updateTrainSchedule(data) {
+            document.getElementById('scheduleTrainName').textContent = data.train_name || `Train ${data.train_number}`;
+            document.getElementById('scheduleTrainNumberDisplay').textContent = data.train_number;
+            document.getElementById('trainRoute').textContent = data.route || 'N/A';
+            document.getElementById('runningDays').textContent = data.running_days || 'N/A';
+            
+            // Update schedule table
+            const scheduleBody = document.getElementById('trainScheduleBody');
+            scheduleBody.innerHTML = '';
+            
+            if (data.stations && data.stations.length > 0) {
+                data.stations.forEach(station => {
+                    const row = document.createElement('tr');
+                    
+                    row.innerHTML = `
+                        <td>${station.sr_no || '-'}</td>
+                        <td>${station.station}</td>
+                        <td>${station.code || '-'}</td>
+                        <td>${station.arrives || '-'}</td>
+                        <td>${station.departs || '-'}</td>
+                        <td>${station.halt || '-'}</td>
+                        <td>${station.distance || '-'}</td>
+                        <td>${station.day || '1'}</td>
+                    `;
+                    
+                    scheduleBody.appendChild(row);
+                });
+            } else {
+                scheduleBody.innerHTML = '<tr><td colspan="8" style="text-align: center;">No schedule information available</td></tr>';
+            }
+            
+            showTrainSchedule();
+        }
+
+        function changePNR() {
+            hidePNRStatus();
+            document.getElementById('pnrNumber').focus();
+        }
+        
+        // Live Status functions
+        function showLoading() {
+            document.getElementById('loading').style.display = 'block';
+        }
+        
+        function hideLoading() {
+            document.getElementById('loading').style.display = 'none';
+        }
+        
+        function showError(message) {
+            const errorElement = document.getElementById('errorMessage');
+            errorElement.textContent = message;
+            errorElement.style.display = 'block';
+        }
+        
+        function hideError() {
+            document.getElementById('errorMessage').style.display = 'none';
+        }
+        
+        function showStatus() {
+            document.getElementById('statusContainer').style.display = 'block';
+        }
+        
+        function hideStatus() {
+            document.getElementById('statusContainer').style.display = 'none';
+            document.getElementById('noDataMessage').style.display = 'none';
+            document.getElementById('scheduleContent').style.display = 'none';
+        }
+
+        // PNR Status functions
+        function showPNRLoading() {
+            document.getElementById('pnrLoading').style.display = 'block';
+        }
+        
+        function hidePNRLoading() {
+            document.getElementById('pnrLoading').style.display = 'none';
+        }
+        
+        function showPNRError(message) {
+            const errorElement = document.getElementById('pnrErrorMessage');
+            errorElement.textContent = message;
+            errorElement.style.display = 'block';
+        }
+        
+        function hidePNRError() {
+            document.getElementById('pnrErrorMessage').style.display = 'none';
+        }
+        
+        function showPNRStatus() {
+            document.getElementById('pnrContainer').style.display = 'block';
+        }
+        
+        function hidePNRStatus() {
+            document.getElementById('pnrContainer').style.display = 'none';
+        }
+
+        // Train Schedule functions
+        function showTrainSchedule() {
+            document.getElementById('trainScheduleContainer').style.display = 'block';
+        }
+
+        function hideTrainSchedule() {
+            document.getElementById('trainScheduleContainer').style.display = 'none';
+        }
+
+        function showScheduleLoading() {
+            document.getElementById('scheduleLoading').style.display = 'block';
+        }
+
+        function hideScheduleLoading() {
+            document.getElementById('scheduleLoading').style.display = 'none';
+        }
+
+        function showScheduleError(message) {
+            const errorElement = document.getElementById('scheduleErrorMessage');
+            errorElement.textContent = message;
+            errorElement.style.display = 'block';
+        }
+
+        function hideScheduleError() {
+            document.getElementById('scheduleErrorMessage').style.display = 'none';
+        }
+        
+        // Handle Enter key in inputs
+        document.getElementById('trainNumber').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                getLiveStatus();
+            }
+        });
+
+        document.getElementById('pnrNumber').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                getPNRStatus();
+            }
+        });
+    </script>
+</body>
+</html>
