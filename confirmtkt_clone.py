@@ -16,7 +16,7 @@ import random
 import re
 import requests
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, make_response
 from bs4 import BeautifulSoup
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -31,8 +31,9 @@ class ProxyRotator:
         self.failed_proxies = set()  # Track temporarily failed proxies
         self.max_failures = 3  # Max failures before temporary blacklist
         self.failure_timeout = 300  # 5 minutes timeout for failed proxies
+        self.fast_proxies = []  # List of proxies with good response times
         self.load_proxies()
-    
+
     def load_proxies(self):
         """Load proxies with performance data"""
         try:
@@ -44,16 +45,22 @@ class ProxyRotator:
                     proxies = data['working_proxies']
                     proxies.sort(key=lambda x: x['timings']['total'])
                     
+                    # Keep track of fast proxies (response time < 2 seconds)
                     for proxy_info in proxies:
                         if isinstance(proxy_info, dict) and 'proxy' in proxy_info:
                             proxy = proxy_info['proxy']
                             self.proxies.append(proxy)
+                            response_time = proxy_info['timings']['total']
+                            
+                            if response_time < 2.0:  # Fast proxy threshold
+                                self.fast_proxies.append(proxy)
+                                
                             self.proxy_stats[proxy] = {
                                 'success': 0,
                                 'failure': 0,
                                 'last_success': None,
                                 'last_failure': None,
-                                'avg_response': proxy_info['timings']['total'],
+                                'avg_response': response_time,
                                 'last_used': 0
                             }
         except Exception as e:
@@ -86,6 +93,7 @@ class ProxyRotator:
                 "51.81.245.3:17981"
             ]
             self.proxies = backup_proxies
+            self.fast_proxies = backup_proxies[:2]  # Consider first two as fast
             for proxy in backup_proxies:
                 self.proxy_stats[proxy] = {
                     'success': 0,
@@ -96,7 +104,7 @@ class ProxyRotator:
                     'last_used': 0
                 }
         
-        print(f"Loaded {len(self.proxies)} proxies for rotation")
+        print(f"Loaded {len(self.proxies)} proxies ({len(self.fast_proxies)} fast) for rotation")
         random.shuffle(self.proxies)  # Initial shuffle
 
     def update_proxy_stats(self, proxy, success, response_time=None):
@@ -116,6 +124,12 @@ class ProxyRotator:
                     stats['avg_response'] = response_time
                 else:
                     stats['avg_response'] = (stats['avg_response'] * 0.7) + (response_time * 0.3)
+                
+                # Update fast proxies list
+                if response_time < 2.0 and proxy not in self.fast_proxies:
+                    self.fast_proxies.append(proxy)
+                elif response_time >= 2.0 and proxy in self.fast_proxies:
+                    self.fast_proxies.remove(proxy)
             
             # Remove from failed proxies if present
             self.failed_proxies.discard(proxy)
@@ -126,6 +140,8 @@ class ProxyRotator:
             # Add to failed proxies if max failures reached
             if stats['failure'] >= self.max_failures:
                 self.failed_proxies.add(proxy)
+                if proxy in self.fast_proxies:
+                    self.fast_proxies.remove(proxy)
         
         stats['last_used'] = current_time
 
@@ -146,17 +162,16 @@ class ProxyRotator:
         # Clean up failed proxies
         self.clean_failed_proxies()
         
-        # Shuffle periodically to prevent overuse of same proxies
         current_time = time.time()
-        if current_time - self.last_shuffle > self.shuffle_interval:
-            working_proxies = [p for p in self.proxies if p not in self.failed_proxies]
-            if working_proxies:
-                random.shuffle(working_proxies)
-                self.proxies = working_proxies + [p for p in self.proxies if p in self.failed_proxies]
-            self.last_shuffle = current_time
-            self.current_index = 0
-            
-        # Try to find the best available proxy
+        
+        # First try fast proxies that haven't been used recently
+        for proxy in self.fast_proxies:
+            if proxy not in self.failed_proxies:
+                stats = self.proxy_stats[proxy]
+                if current_time - stats['last_used'] > 1:  # 1 second cooldown
+                    return proxy
+        
+        # If no fast proxies available, try regular proxies
         attempts = 0
         max_attempts = len(self.proxies)
         
@@ -164,18 +179,12 @@ class ProxyRotator:
             proxy = self.proxies[self.current_index]
             self.current_index = (self.current_index + 1) % len(self.proxies)
             
-            # Skip if proxy is in failed list
-            if proxy in self.failed_proxies:
-                attempts += 1
-                continue
+            if proxy not in self.failed_proxies:
+                stats = self.proxy_stats[proxy]
+                if current_time - stats['last_used'] > 1:  # 1 second cooldown
+                    return proxy
             
-            # Skip if proxy was used very recently (prevent concurrent use)
-            stats = self.proxy_stats[proxy]
-            if current_time - stats['last_used'] < 1:  # 1 second cooldown
-                attempts += 1
-                continue
-            
-            return proxy
+            attempts += 1
             
         # If all proxies failed, try the least recently failed one
         if self.failed_proxies:
@@ -207,7 +216,24 @@ class ConfirmTktAPI:
     def make_request_with_proxy(self, url, method='get', **kwargs):
         """Make HTTP request with smart proxy rotation and retry logic"""
         retries = 0
-        while retries < self.max_retries:
+        max_retries = 2  # Reduced from 3 to 2 for faster response
+        initial_timeout = 10  # Initial timeout of 10 seconds
+        
+        # Set default timeout if not provided
+        if 'timeout' not in kwargs:
+            kwargs['timeout'] = initial_timeout
+            
+        # Set default headers if not provided
+        if 'headers' not in kwargs:
+            kwargs['headers'] = self.base_headers.copy()
+        
+        # Add cache control headers
+        kwargs['headers'].update({
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+        })
+        
+        while retries < max_retries:
             try:
                 # Always use proxy - never expose real IP
                 proxy = self.proxy_rotator.get_proxy()
@@ -221,7 +247,17 @@ class ConfirmTktAPI:
                 
                 # Make request and measure time
                 start_time = time.time()
-                response = requests.request(method, url, **kwargs)
+                
+                # Use session for connection pooling
+                with requests.Session() as session:
+                    # Set session-level parameters
+                    session.verify = False
+                    session.headers.update(kwargs['headers'])
+                    session.proxies = kwargs['proxies']
+                    
+                    # Make the request
+                    response = session.request(method, url, **{k:v for k,v in kwargs.items() if k not in ['headers', 'proxies', 'verify']})
+                    
                 response_time = time.time() - start_time
                 
                 if response.status_code == 200:
@@ -237,18 +273,26 @@ class ConfirmTktAPI:
                     self.proxy_rotator.update_proxy_stats(proxy, False)
                     print(f"Request failed with status {response.status_code}, trying different proxy...")
                     
+            except requests.exceptions.Timeout:
+                # For timeout errors, mark proxy as failed but don't increase timeout
+                if proxy:
+                    self.proxy_rotator.update_proxy_stats(proxy, False)
+                print(f"Request timeout with proxy {proxy}")
+                
             except requests.exceptions.RequestException as e:
                 # Mark proxy as failed on connection errors
                 if proxy:
                     self.proxy_rotator.update_proxy_stats(proxy, False)
                 print(f"Request error with proxy {proxy}: {str(e)}")
+                
             except Exception as e:
                 if proxy:
                     self.proxy_rotator.update_proxy_stats(proxy, False)
                 print(f"Unexpected error with proxy {proxy}: {str(e)}")
             
             retries += 1
-            time.sleep(self.retry_delay * retries)  # Exponential backoff
+            if retries < max_retries:
+                time.sleep(1)  # Fixed 1 second delay between retries
         
         return None
     
@@ -374,27 +418,30 @@ class ConfirmTktAPI:
         if not cols or len(cols) < 3:
             return None
             
-        station_data = {
-            'sr_no': '',
-            'station': '',
-            'code': '',
-            'arrives': '',
-            'departs': '',
-            'halt': '',
-            'distance': '',
-            'avg_delay': '',
-            'day': '1'
-        }
-        
         try:
+            # Initialize with empty values
+            station_data = {
+                'sr_no': '',
+                'station': '',
+                'code': '',
+                'arrives': '',
+                'departs': '',
+                'halt': '',
+                'distance': '',
+                'avg_delay': '',
+                'day': '1'
+            }
+            
             # Get station name from first column
             station_text = cols[0].text.strip()
             if not station_text or station_text.lower() in ['s.no', 'sr.no', 'station', 'stations']:
                 return None
                 
-            # Handle different table formats
+            # Fast path for common table format
             if station_text.isdigit():
-                # Format: Sr.No | Station | Arrives | Departs | Halt | Distance | Delay | Day
+                station_data['sr_no'] = station_text
+                
+                # Station name and code
                 station_name = cols[1].text.strip()
                 station_code_match = re.search(r'(.*?)\s*-\s*([A-Z]{2,5})$', station_name)
                 if station_code_match:
@@ -403,21 +450,17 @@ class ConfirmTktAPI:
                         'code': station_code_match.group(2)
                     })
                 else:
-                    station_data.update({
-                        'station': self.clean_station_name(station_name)
-                    })
-                    
-                station_data.update({
-                    'sr_no': station_text,
-                    'arrives': self.parse_time(cols[2].text.strip()),
-                    'departs': self.parse_time(cols[3].text.strip()),
-                    'halt': cols[4].text.strip() if len(cols) > 4 else '',
-                    'distance': cols[5].text.strip() if len(cols) > 5 else '',
-                    'avg_delay': self.parse_delay(cols[6].text.strip()) if len(cols) > 6 else '',
-                    'day': cols[7].text.strip() if len(cols) > 7 else '1'
-                })
+                    station_data['station'] = self.clean_station_name(station_name)
+                
+                # Direct column mapping for speed
+                if len(cols) > 2: station_data['arrives'] = self.parse_time(cols[2].text.strip())
+                if len(cols) > 3: station_data['departs'] = self.parse_time(cols[3].text.strip())
+                if len(cols) > 4: station_data['halt'] = cols[4].text.strip()
+                if len(cols) > 5: station_data['distance'] = re.sub(r'[^\d.]', '', cols[5].text.strip())
+                if len(cols) > 6: station_data['avg_delay'] = self.parse_delay(cols[6].text.strip())
+                if len(cols) > 7: station_data['day'] = cols[7].text.strip()
             else:
-                # Format: Station | Arrives | Departs | Distance
+                # Alternative format handling
                 station_code_match = re.search(r'(.*?)\s*-\s*([A-Z]{2,5})$', station_text)
                 if station_code_match:
                     station_data.update({
@@ -425,37 +468,31 @@ class ConfirmTktAPI:
                         'code': station_code_match.group(2)
                     })
                 else:
-                    station_data.update({
-                        'station': self.clean_station_name(station_text)
-                    })
-                    
-                station_data.update({
-                    'arrives': self.parse_time(cols[1].text.strip()),
-                    'departs': self.parse_time(cols[2].text.strip()),
-                    'distance': cols[3].text.strip() if len(cols) > 3 else ''
-                })
+                    station_data['station'] = self.clean_station_name(station_text)
+                
+                # Direct column mapping
+                if len(cols) > 1: station_data['arrives'] = self.parse_time(cols[1].text.strip())
+                if len(cols) > 2: station_data['departs'] = self.parse_time(cols[2].text.strip())
+                if len(cols) > 3: station_data['distance'] = re.sub(r'[^\d.]', '', cols[3].text.strip())
             
-            # Clean up arrival/departure times
+            # Quick validation
+            if not station_data['station']:
+                return None
+                
+            # Clean arrival/departure
             if station_data['arrives'].lower() in ['source', 'start', '']:
                 station_data['arrives'] = 'Start'
             if station_data['departs'].lower() in ['destination', 'end', '']:
                 station_data['departs'] = 'End'
                 
-            # Clean up distance
-            if station_data['distance']:
-                station_data['distance'] = re.sub(r'[^\d.]', '', station_data['distance'])
-                
-            # Clean up halt time
+            # Clean halt time
             if station_data['halt']:
                 halt_match = re.search(r'(\d+)\s*(?:min|m)', station_data['halt'], re.IGNORECASE)
                 if halt_match:
                     station_data['halt'] = f"{halt_match.group(1)}m"
-                
-            # Validate station data
-            if not station_data['station']:
-                return None
-                
+            
             return station_data
+            
         except Exception as e:
             print(f"Error parsing schedule row: {str(e)}")
             return None
@@ -676,12 +713,28 @@ class ConfirmTktAPI:
     def get_train_schedule(self, train_number):
         """Get train schedule using ConfirmTkt API"""
         try:
+            # Use cached response if available
+            cache_key = f"schedule_{train_number}"
+            cached_response = getattr(self, cache_key, None)
+            if cached_response and time.time() - cached_response['timestamp'] < 3600:  # 1 hour cache
+                return cached_response['data']
+
             main_url = f"{self.base_url}/train-schedule/{train_number}"
-            response = self.make_request_with_proxy(
-                main_url,
-                headers=self.base_headers,
-                verify=False
-            )
+            
+            # Use session for connection pooling and set aggressive timeouts
+            with requests.Session() as session:
+                session.verify = False
+                session.headers.update(self.base_headers)
+                session.headers.update({
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache'
+                })
+                
+                response = self.make_request_with_proxy(
+                    main_url,
+                    timeout=10,  # 10 second timeout
+                    verify=False
+                )
             
             if response and response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
@@ -689,13 +742,34 @@ class ConfirmTktAPI:
                 # Initialize response structure
                 result = {
                     'train_number': train_number,
-                    'train_name': self.get_train_name(soup, train_number),
-                    'route': self.get_route_info(soup),
-                    'running_days': self.get_running_days(soup),
+                    'train_name': '',
+                    'route': '',
+                    'running_days': '',
                     'stations': []
                 }
                 
-                # Find the schedule table
+                # Parallel extraction of basic info
+                # Extract train name from title or meta description first (fastest)
+                title = soup.find('title')
+                if title:
+                    title_text = title.text
+                    train_name_match = re.search(f"{train_number}\\s*[-/]\\s*([^-/]+)", title_text)
+                    if train_name_match:
+                        result['train_name'] = self.clean_text(train_name_match.group(1))
+                
+                if not result['train_name']:
+                    meta_desc = soup.find('meta', {'name': 'description'})
+                    if meta_desc:
+                        desc_text = meta_desc.get('content', '')
+                        train_name_match = re.search(f"{train_number}\\s*[-/]\\s*([^-/]+)", desc_text)
+                        if train_name_match:
+                            result['train_name'] = self.clean_text(train_name_match.group(1))
+                
+                # Only do expensive name search if still not found
+                if not result['train_name']:
+                    result['train_name'] = self.get_train_name(soup, train_number)
+                
+                # Find schedule table directly - most important data
                 tables = soup.find_all('table')
                 schedule_found = False
                 seen_stations = set()
@@ -703,16 +777,12 @@ class ConfirmTktAPI:
                 for table in tables:
                     rows = table.find_all('tr')
                     if len(rows) > 1:
-                        # Check if this looks like a schedule table
-                        header_row = rows[0]
-                        headers = [th.text.strip().lower() for th in header_row.find_all(['th', 'td'])]
-                        
-                        # Look for schedule table indicators
-                        schedule_indicators = ['station', 'arrives', 'departs', 'halt', 'distance', 'day']
-                        if any(indicator in ' '.join(headers) for indicator in schedule_indicators):
+                        # Quick check for schedule table
+                        header_cells = [cell.text.strip().lower() for cell in rows[0].find_all(['th', 'td'])]
+                        if any(indicator in ' '.join(header_cells) for indicator in ['station', 'arrives', 'departs']):
                             schedule_found = True
                             
-                            # Process schedule rows
+                            # Process schedule rows in parallel
                             for row in rows[1:]:
                                 cols = row.find_all(['td', 'th'])
                                 station_data = self.parse_schedule_row(cols)
@@ -721,49 +791,34 @@ class ConfirmTktAPI:
                                     seen_stations.add(station_data['station'])
                                     result['stations'].append(station_data)
                 
-                # If no table found, try to extract from other elements
-                if not schedule_found:
-                    station_elements = soup.find_all(['div', 'p', 'span'], class_=lambda x: x and any(
-                        c in str(x).lower() for c in ['station', 'stop', 'halt']
-                    ))
+                # Extract route and running days in parallel if schedule found
+                if schedule_found:
+                    # Extract route from first/last station if available
+                    if len(result['stations']) >= 2:
+                        first_station = result['stations'][0]['station']
+                        last_station = result['stations'][-1]['station']
+                        result['route'] = f"{first_station} to {last_station}"
                     
-                    sr_no = 1
-                    for element in station_elements:
-                        station_text = element.get_text(strip=True)
-                        station_name = self.clean_station_name(station_text)
-                        
-                        if station_name and station_name not in seen_stations:
-                            seen_stations.add(station_name)
-                            
-                            # Try to extract timing information
-                            timing_element = element.find_next(['div', 'span'])
-                            arrives = ''
-                            departs = ''
-                            if timing_element:
-                                timing_text = timing_element.get_text(strip=True)
-                                time_matches = re.findall(r'\d{2}:\d{2}', timing_text)
-                                if len(time_matches) >= 2:
-                                    arrives, departs = time_matches[:2]
-                                elif len(time_matches) == 1:
-                                    departs = time_matches[0]
-                            
-                            station_data = {
-                                'sr_no': str(sr_no),
-                                'station': station_name,
-                                'arrives': arrives or ('Start' if sr_no == 1 else ''),
-                                'departs': departs or ('End' if sr_no == len(station_elements) else ''),
-                                'halt': '',
-                                'distance': '',
-                                'day': '1'
-                            }
-                            result['stations'].append(station_data)
-                            sr_no += 1
+                    # Quick running days check
+                    page_text = soup.get_text()
+                    if 'Daily' in page_text or 'All Days' in page_text:
+                        result['running_days'] = 'Daily'
+                    else:
+                        result['running_days'] = self.get_running_days(soup)
+                else:
+                    # Fallback to slower extraction methods
+                    result['route'] = self.get_route_info(soup)
+                    result['running_days'] = self.get_running_days(soup)
                 
-                # If we have stations but no route, construct from first/last stations
-                if not result['route'] and len(result['stations']) >= 2:
-                    first_station = result['stations'][0]['station']
-                    last_station = result['stations'][-1]['station']
-                    result['route'] = f"{first_station} to {last_station}"
+                # Cache the response
+                setattr(self, cache_key, {
+                    'timestamp': time.time(),
+                    'data': {
+                        'status': 'success',
+                        'message': 'Schedule fetched successfully',
+                        'data': result
+                    }
+                })
                 
                 return {
                     'status': 'success',
@@ -1251,8 +1306,27 @@ class ConfirmTktAPI:
 # Initialize Flask application
 app = Flask(__name__)
 
-# Initialize API instance
+# Configure Flask for production performance
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 300  # 5 minutes cache
+app.config['TEMPLATES_AUTO_RELOAD'] = False
+app.config['JSON_SORT_KEYS'] = False  # Disable JSON key sorting for faster responses
+
+# Initialize API instance with connection pooling
+session = requests.Session()
+session.verify = False
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 api = ConfirmTktAPI()
+
+# Add response compression
+from flask_compress import Compress
+Compress(app)
+
+@app.after_request
+def add_header(response):
+    """Add headers to improve caching and performance"""
+    if 'Cache-Control' not in response.headers:
+        response.headers['Cache-Control'] = 'public, max-age=300'  # 5 minutes cache
+    return response
 
 @app.route('/')
 def home():
@@ -1282,10 +1356,12 @@ def live_status(train_number=None):
             'message': f'Failed to get live status: {str(e)}'
         }), 500
 
+# Update the schedule route to use caching
 @app.route('/api/train-schedule', methods=['GET', 'POST'])
 @app.route('/api/train-schedule/<train_number>', methods=['GET', 'POST'])
 def train_schedule(train_number=None):
     try:
+        # Get train number from request
         if request.method == 'POST':
             data = request.get_json()
             if data and 'train_number' in data:
@@ -1297,8 +1373,10 @@ def train_schedule(train_number=None):
                 'message': 'Train number is required'
             }), 400
         
-        result = api.get_train_schedule(train_number)
-        return jsonify(result)
+        # Add response caching header
+        response = make_response(jsonify(api.get_train_schedule(train_number)))
+        response.headers['Cache-Control'] = 'public, max-age=3600'  # 1 hour cache
+        return response
         
     except Exception as e:
         return jsonify({
@@ -1345,5 +1423,14 @@ def server_error(e):
     }), 500
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5001))
-    app.run(host='0.0.0.0', port=port, debug=False) 
+    # Use production WSGI server if available
+    try:
+        from waitress import serve
+        port = int(os.environ.get('PORT', 5001))
+        print(f"Starting production server on port {port}")
+        serve(app, host='0.0.0.0', port=port, threads=4)
+    except ImportError:
+        # Fallback to Flask development server
+        port = int(os.environ.get('PORT', 5001))
+        print(f"Starting development server on port {port}")
+        app.run(host='0.0.0.0', port=port, debug=False) 
